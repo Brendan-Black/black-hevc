@@ -787,6 +787,76 @@ fn scaling_list_data(b: &mut Bits, chroma_format: u8) -> Result<ScalingLists> {
     Ok(s)
 }
 
+/// The parameter sets seen so far, by ID: later ones replace earlier ones.
+#[derive(Clone, Debug)]
+pub struct ParamSets {
+    sps: Vec<Option<Sps>>,
+    pps: Vec<Option<Pps>>,
+}
+
+impl Default for ParamSets {
+    fn default() -> Self {
+        ParamSets::new()
+    }
+}
+
+impl ParamSets {
+    pub fn new() -> ParamSets {
+        ParamSets {
+            sps: vec![None; 16],
+            pps: vec![None; 64],
+        }
+    }
+
+    /// Keep an SPS or PPS NAL unit; any other kind is ignored.
+    pub fn add(&mut self, nal: &[u8]) -> Result<()> {
+        match NalHeader::parse(nal)? {
+            NalHeader {
+                kind: nal::SPS,
+                layer: 0,
+                ..
+            } => {
+                let sps = Sps::parse(nal)?;
+                let id = sps.id as usize;
+                self.sps[id] = Some(sps);
+            }
+            NalHeader {
+                kind: nal::PPS,
+                layer: 0,
+                ..
+            } => {
+                let pps = Pps::parse(nal)?;
+                let id = pps.id as usize;
+                self.pps[id] = Some(pps);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The PPS with this ID and the SPS it refers to.
+    pub fn get(&self, pps_id: u32) -> Result<(&Pps, &Sps)> {
+        let missing = || {
+            Error::corrupt(format!(
+                "a slice refers to PPS {pps_id}, which hasn't been sent"
+            ))
+        };
+        let pps = self
+            .pps
+            .get(pps_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or_else(missing)?;
+        let sps = self.sps.get(pps.sps_id as usize).and_then(Option::as_ref);
+        let sps = sps.ok_or_else(|| {
+            Error::corrupt(format!(
+                "PPS {pps_id} refers to SPS {}, which hasn't been sent",
+                pps.sps_id
+            ))
+        })?;
+        Ok((pps, sps))
+    }
+}
+
 impl Pps {
     /// Parse a PPS NAL unit, as it's stored (with emulation prevention bytes).
     pub fn parse(nal: &[u8]) -> Result<Pps> {

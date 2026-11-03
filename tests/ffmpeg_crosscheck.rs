@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use black_hevc::mp4::{Video, nal_units};
-use black_hevc::params::{Pps, Sps};
+use black_hevc::nal::NalHeader;
+use black_hevc::params::{ParamSets, Pps, Sps};
+use black_hevc::slice::SliceHeader;
 use black_hevc::{Error, Syntax};
 
 fn have_ffmpeg() -> bool {
@@ -216,9 +218,9 @@ fn reads_what_ffmpeg_writes() {
 /// Syntax elements as ffmpeg traces them: bit position, name, value.
 type Trace = Vec<(usize, String, i64)>;
 
-/// What ffmpeg's `trace_headers` filter reads from the first SPS and PPS: each syntax
-/// element's bit position, name and value.
-fn ffmpeg_trace(path: &Path) -> Vec<(String, Trace)> {
+/// What ffmpeg's `trace_headers` filter reads from the first `frames` frames, by section
+/// (such as "Sequence Parameter Set"): each syntax element's bit position, name and value.
+fn ffmpeg_trace(path: &Path, frames: usize) -> Vec<(String, Trace)> {
     let out = Command::new("ffmpeg")
         .args(["-hide_banner", "-nostdin", "-i"])
         .arg(path)
@@ -228,13 +230,9 @@ fn ffmpeg_trace(path: &Path) -> Vec<(String, Trace)> {
             "-c",
             "copy",
             "-frames:v",
-            "1",
-            "-bsf:v",
-            "trace_headers",
-            "-f",
-            "null",
-            "-",
+            &frames.min(1 << 30).to_string(),
         ])
+        .args(["-bsf:v", "trace_headers", "-f", "null", "-"])
         .output()
         .unwrap();
     assert!(
@@ -408,7 +406,7 @@ fn parameter_sets_match_ffmpegs_trace() {
             .unwrap()
             .hevc()
             .unwrap();
-        let theirs = ffmpeg_trace(&path);
+        let theirs = ffmpeg_trace(&path, 1);
         let section = |title: &str| {
             &theirs
                 .iter()
@@ -450,4 +448,154 @@ fn parameter_sets_match_ffmpegs_trace() {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+/// Compare the slice headers of the first `frames` frames with ffmpeg's; returns how many.
+fn check_slices(name: &str, path: &Path, frames: usize) -> usize {
+    let video = Video::read(&mut File::open(path).unwrap()).unwrap();
+    let config = video.hevc().unwrap();
+    let mut params = ParamSets::new();
+    for nal in &config.nal_units {
+        params.add(nal).unwrap();
+    }
+    let theirs: Vec<Trace> = ffmpeg_trace(path, frames)
+        .into_iter()
+        .filter(|s| s.0 == "Slice Segment Header")
+        .map(|s| s.1)
+        .collect();
+    let mut file = File::open(path).unwrap();
+    let mut ours = Vec::new();
+    for s in video.samples().iter().take(frames) {
+        let data = s.read(&mut file).unwrap();
+        let mut previous: Option<SliceHeader> = None;
+        for nal in nal_units(&data, config.length_size).unwrap() {
+            let h = NalHeader::parse(nal).unwrap();
+            if h.is_slice() && h.layer == 0 {
+                let (header, trace) = SliceHeader::trace(nal, &params, previous.as_ref());
+                previous =
+                    Some(header.unwrap_or_else(|e| panic!("{name}: slice {}: {e}", ours.len())));
+                ours.push(trace);
+            } else {
+                params.add(nal).unwrap(); // parameter sets sent with the frames
+            }
+        }
+    }
+    assert_eq!(ours.len(), theirs.len(), "{name}: slice count");
+    for (i, (o, t)) in ours.iter().zip(&theirs).enumerate() {
+        compare(&format!("{name} slice {i}"), o, t);
+    }
+    ours.len()
+}
+
+#[test]
+fn slice_headers_match_ffmpegs_trace() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let x265 = |params: &str| -> Vec<String> {
+        ["-c:v", "libx265", "-x265-params"]
+            .into_iter()
+            .map(String::from)
+            .chain([format!("log-level=error:{params}")])
+            .collect()
+    };
+    let hardware = |codec: &str, extra: &[&str]| -> Vec<String> {
+        ["-c:v", codec]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let cases: Vec<(&str, Vec<String>, bool)> = vec![
+        ("x265", x265("keyint=24:bframes=4"), true),
+        (
+            "x265-idr",
+            x265("keyint=12:open-gop=0:bframes=0:ref=3"),
+            true,
+        ),
+        (
+            "x265-slices",
+            x265("slices=3:weightb=1:max-merge=2:temporal-mvp=0"),
+            true,
+        ),
+        (
+            "x265-no-wpp",
+            x265("wpp=0:sao=0:deblock=-1,1:b-pyramid=0:bframes=8:ref=5"),
+            true,
+        ),
+        (
+            "x265-headers",
+            x265("repeat-headers=1:no-deblock=1:lossless=1"),
+            true,
+        ),
+        (
+            "x265-10bit",
+            [
+                &["-pix_fmt".to_string(), "yuv420p10le".to_string()][..],
+                &x265("keyint=20"),
+            ]
+            .concat(),
+            true,
+        ),
+        ("nvenc", hardware("hevc_nvenc", &["-bf", "3"]), false),
+        ("amf", hardware("hevc_amf", &[]), false),
+        (
+            "vulkan",
+            hardware(
+                "hevc_vulkan",
+                &["-init_hw_device", "vulkan", "-vf", "format=nv12,hwupload"],
+            ),
+            false,
+        ),
+    ];
+    for (name, args, required) in cases {
+        let path = std::env::temp_dir().join(format!(
+            "black-hevc-{}-slices-{name}.mp4",
+            std::process::id()
+        ));
+        let out = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=256x144:rate=24",
+                "-t",
+                "3",
+            ])
+            .args(&args)
+            .args(["-y".as_ref(), path.as_os_str()])
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            assert!(
+                !required,
+                "ffmpeg failed on {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            eprintln!(
+                "skipped {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+            );
+            continue;
+        }
+        let n = check_slices(name, &path, usize::MAX);
+        eprintln!("{name}: {n} slice headers match");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// The same for a video of your own: `BLACK_HEVC_VIDEO=<path> ... --ignored`, first 1000 frames.
+#[test]
+#[ignore]
+fn slice_headers_of_a_real_video() {
+    let path = std::env::var("BLACK_HEVC_VIDEO").expect("set BLACK_HEVC_VIDEO to a video's path");
+    let n = check_slices("the video", Path::new(&path), 1000);
+    eprintln!("{n} slice headers match");
 }

@@ -5,6 +5,8 @@ picture from any point in a video, for BrendanTv's thumbnails, without ffmpeg.
 
 ## So far
 
+`slice` reads slice segment headers (I, P and B), and where each slice's data starts.
+
 `params` reads the sequence and picture parameter sets (SPS and PPS): picture size, bit depth,
 block sizes, coding tools, scaling lists, reference picture sets, tiles, and the colour
 description. Each can be traced element by element, for comparison with ffmpeg.
@@ -29,7 +31,7 @@ Fragmented MP4 and encrypted video are reported as unsupported.
 ## Plan
 
 1. MP4: find the keyframe *(done)*
-2. HEVC parameter sets *(done)*, then slice headers
+2. HEVC parameter sets and slice headers *(done)*
 3. CABAC: the slice data
 4. Intra prediction and the inverse transforms: a YUV picture
 5. RGB, scaled, as a PNG (black-png); a C interface for BrendanTv to call through Java's FFM API
@@ -42,7 +44,9 @@ Only keyframes are decoded, since a thumbnail doesn't need the exact frame.
 ```sh
 cargo test
 winrun --test   # also checks every frame against ffprobe, and every SPS and PPS syntax
-                # element against ffmpeg's trace_headers, on Windows with ffmpeg on PATH
+                # element against ffmpeg's trace_headers, on Windows with ffmpeg on PATH;
+                # every slice header too. For a video of your own:
+                # BLACK_HEVC_VIDEO=<path> <test exe> --ignored
 cargo run --release --example keyframe -- video.mp4 240
 cargo run --release --example params -- video.mp4
 ```

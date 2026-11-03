@@ -44,6 +44,11 @@ impl<'a> Bits<'a> {
         }
     }
 
+    /// How many bits have been read.
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
     pub(crate) fn into_trace(self) -> Vec<Syntax> {
         self.trace.unwrap_or_default()
     }
