@@ -1,0 +1,8 @@
+[package]
+name = "black-hevc"
+version = "0.1.0"
+edition = "2024"
+description = "HEVC (H.265) keyframes from MP4 files, with no third-party dependencies"
+
+# No third-party crates.
+[dependencies]
