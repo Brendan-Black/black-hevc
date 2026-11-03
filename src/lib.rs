@@ -4,6 +4,7 @@
 //! [`params`] reads the parameter sets, and [`slice`] the slice headers. Decoding a keyframe into a picture comes next.
 
 mod bits;
+mod cabac;
 mod error;
 pub mod mp4;
 pub mod nal;

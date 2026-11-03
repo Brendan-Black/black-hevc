@@ -32,7 +32,7 @@ Fragmented MP4 and encrypted video are reported as unsupported.
 
 1. MP4: find the keyframe *(done)*
 2. HEVC parameter sets and slice headers *(done)*
-3. CABAC: the slice data
+3. CABAC: the decoding engine and I-slice contexts *(done)*, then the slice data syntax
 4. Intra prediction and the inverse transforms: a YUV picture
 5. RGB, scaled, as a PNG (black-png); a C interface for BrendanTv to call through Java's FFM API
 6. The deblocking and SAO filters
