@@ -7,6 +7,10 @@ picture from any point in a video, for BrendanTv's thumbnails, without ffmpeg.
 
 `slice` reads slice segment headers (I, P and B), and where each slice's data starts.
 
+`slice_data` reads intra pictures' slice data with CABAC: SAO parameters, coding and transform
+trees, intra modes, QPs and coefficients, handed to a `Sink` in decoding order. Tiles and the
+range extension's coding tools are reported as unsupported.
+
 `params` reads the sequence and picture parameter sets (SPS and PPS): picture size, bit depth,
 block sizes, coding tools, scaling lists, reference picture sets, tiles, and the colour
 description. Each can be traced element by element, for comparison with ffmpeg.
@@ -32,7 +36,7 @@ Fragmented MP4 and encrypted video are reported as unsupported.
 
 1. MP4: find the keyframe *(done)*
 2. HEVC parameter sets and slice headers *(done)*
-3. CABAC: the decoding engine and I-slice contexts *(done)*, then the slice data syntax
+3. CABAC: the decoding engine, and the slice data of intra pictures *(done)*
 4. Intra prediction and the inverse transforms: a YUV picture
 5. RGB, scaled, as a PNG (black-png); a C interface for BrendanTv to call through Java's FFM API
 6. The deblocking and SAO filters
@@ -49,4 +53,5 @@ winrun --test   # also checks every frame against ffprobe, and every SPS and PPS
                 # BLACK_HEVC_VIDEO=<path> <test exe> --ignored
 cargo run --release --example keyframe -- video.mp4 240
 cargo run --release --example params -- video.mp4
+cargo run --release --example keyframes -- video.mp4 20   # read 20 keyframes to the end
 ```

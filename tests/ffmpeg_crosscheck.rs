@@ -12,6 +12,7 @@ use black_hevc::mp4::{Video, nal_units};
 use black_hevc::nal::NalHeader;
 use black_hevc::params::{ParamSets, Pps, Sps};
 use black_hevc::slice::SliceHeader;
+use black_hevc::slice_data::{CodingUnit, PictureParser, Sink, TransformBlock};
 use black_hevc::{Error, Syntax};
 
 fn have_ffmpeg() -> bool {
@@ -598,4 +599,216 @@ fn slice_headers_of_a_real_video() {
     let path = std::env::var("BLACK_HEVC_VIDEO").expect("set BLACK_HEVC_VIDEO to a video's path");
     let n = check_slices("the video", Path::new(&path), 1000);
     eprintln!("{n} slice headers match");
+}
+
+#[derive(Default)]
+struct Coverage {
+    cu_area: u64,
+    luma_area: u64,
+    blocks: u64,
+}
+
+impl Sink for Coverage {
+    fn transform_block(&mut self, tb: &TransformBlock) {
+        self.blocks += 1;
+        if tb.c_idx == 0 {
+            self.luma_area += 1 << (2 * tb.log2_size);
+        }
+    }
+
+    fn coding_unit(&mut self, cu: &CodingUnit) {
+        self.cu_area += 1 << (2 * cu.log2_size);
+    }
+}
+
+/// Each NAL unit byte's index in the RBSP.
+fn rbsp_of_nal(nal: &[u8]) -> Vec<usize> {
+    let (mut map, mut zeros, mut r) = (Vec::new(), 0, 0);
+    for &b in nal {
+        map.push(r);
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        r += 1;
+    }
+    map.push(r);
+    map
+}
+
+/// Read every keyframe's slice data: each slice must end at its last byte, each wavefront row
+/// start at its entry point, and the coding units and luma blocks cover the picture once.
+/// Returns how many keyframes and transform blocks.
+fn check_keyframes(name: &str, path: &Path) -> (usize, u64) {
+    let video = Video::read(&mut File::open(path).unwrap()).unwrap();
+    let config = video.hevc().unwrap();
+    let mut params = ParamSets::new();
+    for nal in &config.nal_units {
+        params.add(nal).unwrap();
+    }
+    let mut file = File::open(path).unwrap();
+    let (mut pictures, mut blocks) = (0, 0);
+    for key in video.samples().iter().filter(|s| s.keyframe) {
+        let data = key.read(&mut file).unwrap();
+        let units = nal_units(&data, config.length_size).unwrap();
+        for nal in &units {
+            if !NalHeader::parse(nal).unwrap().is_slice() {
+                params.add(nal).unwrap();
+            }
+        }
+        let mut sink = Coverage::default();
+        let mut picture: Option<PictureParser> = None;
+        let mut previous: Option<SliceHeader> = None;
+        for nal in units {
+            let h = NalHeader::parse(nal).unwrap();
+            if !h.is_slice() || h.layer != 0 {
+                continue;
+            }
+            let header = SliceHeader::parse(nal, &params, previous.as_ref()).unwrap();
+            let (pps, sps) = params.get(u32::from(header.pps_id)).unwrap();
+            let parser = picture.get_or_insert_with(|| PictureParser::new(sps, pps).unwrap());
+            let rbsp = black_hevc::rbsp(nal);
+            let stats = parser
+                .slice(&header, &rbsp, &mut sink)
+                .unwrap_or_else(|e| panic!("{name}: keyframe at {}: {e}", key.offset));
+            let map = rbsp_of_nal(nal);
+            let start = map.iter().position(|&r| r == header.data_offset).unwrap();
+            let want: Vec<usize> = std::iter::once(header.data_offset)
+                .chain(header.entry_points.iter().map(|&e| map[start + e as usize]))
+                .collect();
+            assert_eq!(stats.substreams, want, "{name}: wavefront rows");
+            previous = Some(header);
+        }
+        let (_, sps) = params.get(u32::from(previous.unwrap().pps_id)).unwrap();
+        let area = u64::from(sps.width) * u64::from(sps.height);
+        assert!(picture.unwrap().complete(), "{name}: every CTB");
+        assert_eq!(
+            (sink.cu_area, sink.luma_area),
+            (area, area),
+            "{name}: coverage"
+        );
+        pictures += 1;
+        blocks += sink.blocks;
+    }
+    (pictures, blocks)
+}
+
+#[test]
+fn keyframes_read_to_the_end() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let x265 = |params: &str, pix: &str| -> Vec<String> {
+        ["-pix_fmt", pix, "-c:v", "libx265", "-x265-params"]
+            .into_iter()
+            .map(String::from)
+            .chain([format!("log-level=error:keyint=4:{params}")])
+            .collect()
+    };
+    let hardware = |codec: &str, extra: &[&str]| -> Vec<String> {
+        ["-c:v", codec, "-g", "4"]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let cases: Vec<(&str, Vec<String>, bool)> = vec![
+        ("x265", x265("", "yuv420p"), true),
+        (
+            "slices",
+            x265("open-gop=0:slices=3:signhide=0:tskip=1", "yuv420p"),
+            true,
+        ),
+        ("no-wpp", x265("wpp=0:open-gop=0", "yuv420p"), true),
+        (
+            "small-blocks",
+            x265(
+                "ctu=16:min-cu-size=8:tu-intra-depth=3:tu-inter-depth=1:max-tu-size=8",
+                "yuv420p",
+            ),
+            true,
+        ),
+        (
+            "quant-groups",
+            x265(
+                "ctu=32:qg-size=8:aq-mode=3:aq-strength=2:rdoq-level=2:psy-rdoq=4",
+                "yuv420p",
+            ),
+            true,
+        ),
+        ("lossless", x265("lossless=1", "yuv420p"), true),
+        ("cu-lossless", x265("cu-lossless=1:crf=10", "yuv420p"), true),
+        (
+            "scaling-lists",
+            x265("scaling-list=default:sao=0:crf=5", "yuv420p"),
+            true,
+        ),
+        ("422", x265("tskip=1", "yuv422p"), true),
+        ("444", x265("tu-intra-depth=3", "yuv444p"), true),
+        ("gray", x265("", "gray"), true),
+        ("10bit", x265("crf=2", "yuv420p10le"), true),
+        ("444-10bit", x265("", "yuv444p10le"), true),
+        ("nvenc", hardware("hevc_nvenc", &[]), false),
+        ("amf", hardware("hevc_amf", &[]), false),
+        (
+            "vulkan",
+            hardware(
+                "hevc_vulkan",
+                &[
+                    "-init_hw_device",
+                    "vulkan",
+                    "-vf",
+                    "noise=alls=30:allf=t,format=nv12,hwupload",
+                ],
+            ),
+            false,
+        ),
+    ];
+    for (name, args, required) in cases {
+        let path =
+            std::env::temp_dir().join(format!("black-hevc-{}-keys-{name}.mp4", std::process::id()));
+        let noisy = !args.iter().any(|a| a.contains("hwupload"));
+        let out = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=200x120:rate=24",
+                "-t",
+                "1",
+            ])
+            .args(if noisy {
+                &["-vf", "noise=alls=30:allf=t"][..]
+            } else {
+                &[]
+            })
+            .args(&args)
+            .args(["-y".as_ref(), path.as_os_str()])
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            assert!(
+                !required,
+                "ffmpeg failed on {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            eprintln!(
+                "skipped {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+            );
+            continue;
+        }
+        let (pictures, blocks) = check_keyframes(name, &path);
+        assert!(pictures >= 4, "{name}: {pictures} keyframes");
+        eprintln!("{name}: {pictures} keyframes, {blocks} transform blocks, read to the end");
+        let _ = std::fs::remove_file(&path);
+    }
 }

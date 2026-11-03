@@ -10,6 +10,7 @@ pub mod mp4;
 pub mod nal;
 pub mod params;
 pub mod slice;
+pub mod slice_data;
 
 pub use bits::{Syntax, rbsp};
 pub use error::{Error, Result};

@@ -233,6 +233,11 @@ impl<'a> Cabac<'a> {
         u32::from(b)
     }
 
+    /// The data being decoded.
+    pub(crate) fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
     /// Whether decoding has read past the end of the data: the slice is cut short or corrupt.
     pub(crate) fn overrun(&self) -> bool {
         self.pos > self.data.len() * 8
