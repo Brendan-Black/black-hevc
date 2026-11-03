@@ -5,6 +5,21 @@ picture from any point in a video, for BrendanTv's thumbnails, without ffmpeg.
 
 ## So far
 
+`picture::decode` turns a keyframe's NAL units into a picture: Y, Cb and Cr planes at the
+coded size, with the crop to apply. It does intra prediction (planar, DC and the 33 angles,
+with reference smoothing), scaling with or without scaling lists, the inverse DCT and DST,
+transform skip, lossless blocks and PCM, for 4:0:0 to 4:4:4. Tested against ffmpeg at 8 and
+10 bits; PCM is untested, since no encoder here writes it. The deblocking
+and SAO filters aren't done yet, so block edges can show; ffmpeg gives the same picture with
+`-skip_loop_filter all`.
+
+```rust
+let mut params = ParamSets::new();
+for nal in &config.nal_units { params.add(nal)?; }
+let picture = black_hevc::picture::decode(&mut params, &nal_units(&data, config.length_size)?)?;
+let (width, height, luma) = picture.cropped(0);
+```
+
 `slice` reads slice segment headers (I, P and B), and where each slice's data starts.
 
 `slice_data` reads intra pictures' slice data with CABAC: SAO parameters, coding and transform
@@ -37,7 +52,7 @@ Fragmented MP4 and encrypted video are reported as unsupported.
 1. MP4: find the keyframe *(done)*
 2. HEVC parameter sets and slice headers *(done)*
 3. CABAC: the decoding engine, and the slice data of intra pictures *(done)*
-4. Intra prediction and the inverse transforms: a YUV picture
+4. Intra prediction and the inverse transforms: a YUV picture *(done)*
 5. RGB, scaled, as a PNG (black-png); a C interface for BrendanTv to call through Java's FFM API
 6. The deblocking and SAO filters
 
@@ -49,9 +64,12 @@ Only keyframes are decoded, since a thumbnail doesn't need the exact frame.
 cargo test
 winrun --test   # also checks every frame against ffprobe, and every SPS and PPS syntax
                 # element against ffmpeg's trace_headers, on Windows with ffmpeg on PATH;
-                # every slice header too. For a video of your own:
+                # every slice header too, and every keyframe's pixels against ffmpeg's
+                # (loop filters off). For a video of your own (its slice headers, and
+                # every keyframe's pixels):
                 # BLACK_HEVC_VIDEO=<path> <test exe> --ignored
 cargo run --release --example keyframe -- video.mp4 240
 cargo run --release --example params -- video.mp4
 cargo run --release --example keyframes -- video.mp4 20   # read 20 keyframes to the end
+cargo run --release --example decode -- video.mp4 out.yuv 20   # 20 keyframes as raw YUV
 ```

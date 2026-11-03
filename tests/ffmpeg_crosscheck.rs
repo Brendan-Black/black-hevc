@@ -11,6 +11,7 @@ use std::process::Command;
 use black_hevc::mp4::{Video, nal_units};
 use black_hevc::nal::NalHeader;
 use black_hevc::params::{ParamSets, Pps, Sps};
+use black_hevc::picture::{self, Picture};
 use black_hevc::slice::SliceHeader;
 use black_hevc::slice_data::{CodingUnit, PictureParser, Sink, TransformBlock};
 use black_hevc::{Error, Syntax};
@@ -694,11 +695,9 @@ fn check_keyframes(name: &str, path: &Path) -> (usize, u64) {
     (pictures, blocks)
 }
 
-#[test]
-fn keyframes_read_to_the_end() {
-    if !have_ffmpeg() {
-        return;
-    }
+/// The encoder setups for the slice data and pixel checks: name, ffmpeg arguments, and whether
+/// the encoder must be there (the hardware ones may not be, or may refuse the tiny size).
+fn encoder_cases() -> Vec<(&'static str, Vec<String>, bool)> {
     let x265 = |params: &str, pix: &str| -> Vec<String> {
         ["-pix_fmt", pix, "-c:v", "libx265", "-x265-params"]
             .into_iter()
@@ -713,7 +712,7 @@ fn keyframes_read_to_the_end() {
             .map(|s| s.to_string())
             .collect()
     };
-    let cases: Vec<(&str, Vec<String>, bool)> = vec![
+    vec![
         ("x265", x265("", "yuv420p"), true),
         (
             "slices",
@@ -744,8 +743,18 @@ fn keyframes_read_to_the_end() {
             x265("scaling-list=default:sao=0:crf=5", "yuv420p"),
             true,
         ),
+        (
+            "chroma-offsets",
+            x265("cbqpoffs=-5:crqpoffs=7:tskip=1:crf=8", "yuv420p"),
+            true,
+        ),
+        (
+            "no-strong-smoothing",
+            x265("strong-intra-smoothing=0:crf=35", "yuv420p"),
+            true,
+        ),
         ("422", x265("tskip=1", "yuv422p"), true),
-        ("444", x265("tu-intra-depth=3", "yuv444p"), true),
+        ("444", x265("tu-intra-depth=3:cbqpoffs=3", "yuv444p"), true),
         ("gray", x265("", "gray"), true),
         ("10bit", x265("crf=2", "yuv420p10le"), true),
         ("444-10bit", x265("", "yuv444p10le"), true),
@@ -764,51 +773,179 @@ fn keyframes_read_to_the_end() {
             ),
             false,
         ),
-    ];
-    for (name, args, required) in cases {
-        let path =
-            std::env::temp_dir().join(format!("black-hevc-{}-keys-{name}.mp4", std::process::id()));
-        let noisy = !args.iter().any(|a| a.contains("hwupload"));
-        let out = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=200x120:rate=24",
-                "-t",
-                "1",
-            ])
-            .args(if noisy {
-                &["-vf", "noise=alls=30:allf=t"][..]
-            } else {
-                &[]
-            })
-            .args(&args)
-            .args(["-y".as_ref(), path.as_os_str()])
-            .output()
-            .unwrap();
-        if !out.status.success() {
-            assert!(
-                !required,
-                "ffmpeg failed on {name}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            eprintln!(
-                "skipped {name}: {}",
-                String::from_utf8_lossy(&out.stderr)
-                    .lines()
-                    .last()
-                    .unwrap_or("")
-            );
+    ]
+}
+
+/// Encode a second of noisy test pattern at 200x120, or `None` if an optional encoder failed.
+fn encode_case(name: &str, args: &[String], required: bool) -> Option<PathBuf> {
+    let path =
+        std::env::temp_dir().join(format!("black-hevc-{}-keys-{name}.mp4", std::process::id()));
+    let noisy = !args.iter().any(|a| a.contains("hwupload"));
+    let out = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=200x120:rate=24",
+            "-t",
+            "1",
+        ])
+        .args(if noisy {
+            &["-vf", "noise=alls=30:allf=t"][..]
+        } else {
+            &[]
+        })
+        .args(args)
+        .args(["-y".as_ref(), path.as_os_str()])
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        assert!(
+            !required,
+            "ffmpeg failed on {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        eprintln!(
+            "skipped {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
+        );
+        return None;
+    }
+    Some(path)
+}
+
+#[test]
+fn keyframes_read_to_the_end() {
+    if !have_ffmpeg() {
+        return;
+    }
+    for (name, args, required) in encoder_cases() {
+        let Some(path) = encode_case(name, &args, required) else {
             continue;
-        }
+        };
         let (pictures, blocks) = check_keyframes(name, &path);
         assert!(pictures >= 4, "{name}: {pictures} keyframes");
         eprintln!("{name}: {pictures} keyframes, {blocks} transform blocks, read to the end");
         let _ = std::fs::remove_file(&path);
     }
+}
+
+/// ffmpeg's pixel format for a picture's layout.
+fn pix_fmt(pic: &Picture) -> String {
+    let base = ["gray", "yuv420p", "yuv422p", "yuv444p"][pic.chroma_format as usize];
+    match pic.bit_depth_luma {
+        8 => base.to_string(),
+        d => format!("{base}{d}le"),
+    }
+}
+
+/// Decode every keyframe, and decode them again with ffmpeg: each keyframe is written out as a
+/// raw HEVC stream of its own (a CRA marked as a BLA, so it starts a new sequence) and ffmpeg
+/// decodes it with its loop filters skipped, since ours aren't done yet. Every shown sample
+/// must match. Returns how many keyframes.
+fn check_pixels(name: &str, path: &Path) -> usize {
+    let video = Video::read(&mut File::open(path).unwrap()).unwrap();
+    let config = video.hevc().unwrap();
+    let mut params = ParamSets::new();
+    for nal in &config.nal_units {
+        params.add(nal).unwrap();
+    }
+    let mut file = File::open(path).unwrap();
+    let mut count = 0;
+    for key in video.samples().iter().filter(|s| s.keyframe) {
+        let data = key.read(&mut file).unwrap();
+        let units = nal_units(&data, config.length_size).unwrap();
+        let pic = picture::decode(&mut params, &units)
+            .unwrap_or_else(|e| panic!("{name}: keyframe {count}: {e}"));
+        let mut stream = Vec::new();
+        for nal in config.nal_units.iter().map(Vec::as_slice).chain(units) {
+            stream.extend([0, 0, 0, 1]);
+            if nal[0] >> 1 == 21 {
+                stream.push((nal[0] & 0x81) | 17 << 1);
+                stream.extend(&nal[1..]);
+            } else {
+                stream.extend(nal);
+            }
+        }
+        let hevc = path.with_extension(format!("{count}.hevc"));
+        std::fs::write(&hevc, stream).unwrap();
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(["-skip_loop_filter", "all", "-i"])
+            .arg(&hevc)
+            .args(["-f", "rawvideo", "-pix_fmt", &pix_fmt(&pic), "-"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&hevc);
+        assert!(out.status.success(), "{name}: ffmpeg failed");
+        let mut theirs = out.stdout.as_slice();
+        for c in 0..pic.planes.len() {
+            let (w, h, ours) = pic.cropped(c);
+            let wide = if c == 0 {
+                pic.bit_depth_luma
+            } else {
+                pic.bit_depth_chroma
+            } > 8;
+            let size = ours.len() * if wide { 2 } else { 1 };
+            assert!(
+                theirs.len() >= size,
+                "{name}: keyframe {count}: ffmpeg's is short"
+            );
+            let (plane, rest) = theirs.split_at(size);
+            theirs = rest;
+            for (i, &s) in ours.iter().enumerate() {
+                let t = if wide {
+                    u16::from_le_bytes([plane[2 * i], plane[2 * i + 1]])
+                } else {
+                    u16::from(plane[i])
+                };
+                assert_eq!(
+                    s,
+                    t,
+                    "{name}: keyframe {count}, plane {c} of {w}x{h} at ({}, {})",
+                    i % w as usize,
+                    i / w as usize
+                );
+            }
+        }
+        assert!(
+            theirs.is_empty(),
+            "{name}: ffmpeg decoded more than one picture"
+        );
+        count += 1;
+    }
+    count
+}
+
+#[test]
+fn keyframes_match_ffmpegs_pixels() {
+    if !have_ffmpeg() {
+        return;
+    }
+    for (name, args, required) in encoder_cases() {
+        let Some(path) = encode_case(name, &args, required) else {
+            continue;
+        };
+        let pictures = check_pixels(name, &path);
+        assert!(pictures >= 4, "{name}: {pictures} keyframes");
+        eprintln!("{name}: {pictures} keyframes match ffmpeg's");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// With BLACK_HEVC_VIDEO set to a video of your own: every keyframe matches ffmpeg's.
+#[test]
+#[ignore]
+fn pixels_of_a_real_video() {
+    let path =
+        std::env::var_os("BLACK_HEVC_VIDEO").expect("set BLACK_HEVC_VIDEO to a video's path");
+    let n = check_pixels("the video", Path::new(&path));
+    eprintln!("{n} keyframes match");
 }

@@ -2,7 +2,6 @@
 //! variables (adaptive probabilities) of each syntax element in I slices.
 
 // The slice data decoder (the next piece) is what uses most of this.
-#![allow(dead_code)]
 
 use crate::{Error, Result};
 
@@ -133,9 +132,14 @@ pub(crate) mod ctx {
     pub const SIG_COEFF: usize = 63; // 44: 42, then luma and chroma with transform_skip_context
     pub const GREATER1: usize = 107; // 24
     pub const GREATER2: usize = 131; // 6
+    // The range extension's cross-component prediction and chroma QP offsets, not supported yet.
+    #[allow(dead_code)]
     pub const LOG2_RES_SCALE_ABS: usize = 137; // 8
+    #[allow(dead_code)]
     pub const RES_SCALE_SIGN: usize = 145; // 2
+    #[allow(dead_code)]
     pub const CU_CHROMA_QP_OFFSET_FLAG: usize = 147;
+    #[allow(dead_code)]
     pub const CU_CHROMA_QP_OFFSET_IDX: usize = 148;
     pub const COUNT: usize = 149;
 }

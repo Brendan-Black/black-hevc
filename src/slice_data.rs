@@ -76,7 +76,8 @@ pub struct TransformBlock<'a> {
     pub log2_size: u8,
     /// The intra prediction mode (0 planar, 1 DC, 2 to 34 angular).
     pub mode: u8,
-    pub qp_y: i32,
+    /// The quantization parameter for this component, with its bit-depth offset: Qp′Y, Qp′Cb or Qp′Cr.
+    pub qp: i32,
     pub transquant_bypass: bool,
     pub transform_skip: bool,
     /// The coefficient levels in raster order, or `None` when every one is 0.
@@ -102,15 +103,15 @@ pub struct SliceStats {
 }
 
 /// Scan orders (6.5.3 to 6.5.5): diagonal, horizontal and vertical, for 1x1 to 8x8.
-struct Scans {
+pub(crate) struct Scans {
     /// `pos[log2][scan][i]`: the i-th position.
-    pos: [[Vec<(u8, u8)>; 3]; 4],
+    pub(crate) pos: [[Vec<(u8, u8)>; 3]; 4],
     /// `inv[log2][scan][y * size + x]`: the index of a position.
-    inv: [[Vec<u8>; 3]; 4],
+    pub(crate) inv: [[Vec<u8>; 3]; 4],
 }
 
 impl Scans {
-    fn new() -> Scans {
+    pub(crate) fn new() -> Scans {
         let mut pos: [[Vec<(u8, u8)>; 3]; 4] = Default::default();
         let mut inv: [[Vec<u8>; 3]; 4] = Default::default();
         for log2 in 0..4 {
@@ -243,6 +244,7 @@ impl<'a> PictureParser<'a> {
         }
         if !h.dependent {
             self.slice_addr = h.address;
+            self.last_qp = h.qp;
         } else if addr == 0 || self.slices[addr as usize - 1] == NO_SLICE {
             return Err(Error::corrupt(
                 "a dependent slice segment doesn't follow the one before it",
@@ -255,7 +257,6 @@ impl<'a> PictureParser<'a> {
             c: Contexts::new(h.qp),
             h,
             sink,
-            first_qg: !h.dependent,
             qg_pred: h.qp,
             qp_y: h.qp,
             delta_coded: false,
@@ -345,8 +346,6 @@ struct Run<'r, 'a, 'd, S: Sink> {
     c: Contexts,
     h: &'r SliceHeader,
     sink: &'r mut S,
-    /// The next quantization group is the first of its slice or wavefront row.
-    first_qg: bool,
     /// qPY_PRED of the current quantization group, and QpY now.
     qg_pred: i32,
     qp_y: i32,
@@ -376,7 +375,8 @@ impl<S: Sink> Run<'_, '_, '_, S> {
         } else {
             Contexts::new(self.h.qp)
         };
-        self.first_qg = true;
+        // The first quantization group of a row predicts from the slice QP.
+        self.p.last_qp = self.h.qp;
         Ok(())
     }
 
@@ -500,12 +500,9 @@ impl<S: Sink> Run<'_, '_, '_, S> {
 
     /// qPY_PRED (8.6.1), from the groups to the left and above when they're in this CTB.
     fn start_quantization_group(&mut self, x: u32, y: u32) {
-        let prev = if self.first_qg {
-            self.h.qp
-        } else {
-            self.p.last_qp
-        };
-        self.first_qg = false;
+        // qPY_PREV: QpY of the last coding unit before this group (a group can start more
+        // than once, at each depth of the quadtree down to its size).
+        let prev = self.p.last_qp;
         let mask = (1 << self.p.sps.log2_ctb) - 1;
         let a = if x & mask != 0 {
             i32::from(self.p.qps[self.p.at(x - 1, y)])
@@ -820,6 +817,32 @@ impl<S: Sink> Run<'_, '_, '_, S> {
         Ok(())
     }
 
+    /// Qp′Y, Qp′Cb or Qp′Cr (8.6.1): chroma's from QpY, its offsets and, for 4:2:0, Table 8-10.
+    fn component_qp(&self, c: u8) -> i32 {
+        let sps = self.p.sps;
+        if c == 0 {
+            return self.qp_y + 6 * (i32::from(sps.bit_depth_luma) - 8);
+        }
+        let bd = 6 * (i32::from(sps.bit_depth_chroma) - 8);
+        let pps = self.p.pps;
+        let offset = if c == 1 {
+            pps.cb_qp_offset + self.h.cb_qp_offset
+        } else {
+            pps.cr_qp_offset + self.h.cr_qp_offset
+        };
+        let qpi = (self.qp_y + i32::from(offset)).clamp(-bd, 57);
+        let qpc = if sps.chroma_format != 1 {
+            qpi.min(51)
+        } else if qpi < 30 {
+            qpi
+        } else if qpi <= 43 {
+            [29, 30, 31, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37, 37][qpi as usize - 30]
+        } else {
+            qpi - 6
+        };
+        qpc + bd
+    }
+
     /// k-th order Exp-Golomb in bypass bins.
     fn exp_golomb(&mut self, mut k: u32) -> Result<u32> {
         let mut v = 0u32;
@@ -875,7 +898,7 @@ impl<S: Sink> Run<'_, '_, '_, S> {
             y,
             log2_size: log2,
             mode,
-            qp_y: self.qp_y,
+            qp: self.component_qp(c),
             transquant_bypass: cu.transquant_bypass,
             transform_skip,
             coeffs: coded.then(|| &self.coeffs[..n]),
