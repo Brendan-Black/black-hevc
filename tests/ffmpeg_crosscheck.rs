@@ -8,8 +8,9 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use black_hevc::Error;
 use black_hevc::mp4::{Video, nal_units};
+use black_hevc::params::{Pps, Sps};
+use black_hevc::{Error, Syntax};
 
 fn have_ffmpeg() -> bool {
     let found = Command::new("ffmpeg")
@@ -210,4 +211,243 @@ fn reads_what_ffmpeg_writes() {
         Err(Error::Unsupported(_))
     ));
     let _ = std::fs::remove_file(&path);
+}
+
+/// Syntax elements as ffmpeg traces them: bit position, name, value.
+type Trace = Vec<(usize, String, i64)>;
+
+/// What ffmpeg's `trace_headers` filter reads from the first SPS and PPS: each syntax
+/// element's bit position, name and value.
+fn ffmpeg_trace(path: &Path) -> Vec<(String, Trace)> {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostdin", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:v",
+            "-c",
+            "copy",
+            "-frames:v",
+            "1",
+            "-bsf:v",
+            "trace_headers",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "ffmpeg's trace failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut sections: Vec<(String, Trace)> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stderr).lines() {
+        let Some(rest) = line
+            .strip_prefix("[trace_headers @ ")
+            .and_then(|l| l.split_once("] "))
+            .map(|(_, r)| r)
+        else {
+            continue;
+        };
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        match words[0].parse::<usize>() {
+            Ok(pos) => sections.last_mut().unwrap().1.push((
+                pos,
+                words[1].to_string(),
+                words.last().unwrap().parse().unwrap(),
+            )),
+            Err(_) => sections.push((rest.trim().to_string(), Vec::new())),
+        }
+    }
+    sections
+}
+
+/// Every element we read must be one ffmpeg read at the same bit, with the same value, and we
+/// must read every element ffmpeg did, except the profile's constraint flags, which we skip.
+fn compare(what: &str, ours: &[Syntax], theirs: &[(usize, String, i64)]) {
+    let base = |n: &str| n.split('[').next().unwrap().to_string();
+    let by_pos: std::collections::HashMap<usize, &(usize, String, i64)> =
+        theirs.iter().map(|t| (t.0, t)).collect();
+    for s in ours {
+        let Some(t) = by_pos.get(&s.pos) else {
+            panic!(
+                "{what}: we read {} at bit {}, where ffmpeg read nothing",
+                s.name, s.pos
+            )
+        };
+        assert_eq!(
+            (base(&s.name), s.value),
+            (base(&t.1), t.2),
+            "{what}: at bit {}",
+            s.pos
+        );
+    }
+    let ours_at: std::collections::HashSet<usize> = ours.iter().map(|s| s.pos).collect();
+    for t in theirs.iter().filter(|t| !ours_at.contains(&t.0)) {
+        assert!(
+            t.1.starts_with("general_") || t.1.starts_with("sub_layer_"),
+            "{what}: ffmpeg read {} at bit {}, which we skipped",
+            t.1,
+            t.0
+        );
+    }
+}
+
+#[test]
+fn parameter_sets_match_ffmpegs_trace() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let x265 = |params: &str, pix: &str| -> Vec<String> {
+        ["-pix_fmt", pix, "-c:v", "libx265", "-x265-params"]
+            .into_iter()
+            .map(String::from)
+            .chain([format!("log-level=error:{params}")])
+            .collect()
+    };
+    let hardware = |codec: &str, extra: &[&str]| -> Vec<String> {
+        ["-c:v", codec]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let cases: Vec<(&str, Vec<String>, bool)> = vec![
+        ("x265", x265("", "yuv420p"), true),
+        (
+            "x265-tools",
+            x265(
+                "scaling-list=default:amp=1:rect=1:sao=0:signhide=0:strong-intra-smoothing=0:tskip=1:constrained-intra=1",
+                "yuv420p",
+            ),
+            true,
+        ),
+        (
+            "x265-sizes",
+            x265(
+                "ctu=32:min-cu-size=16:tu-intra-depth=3:tu-inter-depth=2:max-tu-size=16:wpp=0:cu-lossless=1",
+                "yuv420p",
+            ),
+            true,
+        ),
+        (
+            "x265-small-ctu",
+            x265(
+                "ctu=16:min-cu-size=8:max-tu-size=8:deblock=-2,3:cbqpoffs=3:crqpoffs=-4",
+                "yuv420p",
+            ),
+            true,
+        ),
+        (
+            "x265-vui",
+            x265(
+                "hrd=1:vbv-bufsize=2000:vbv-maxrate=1000:colorprim=bt709:transfer=bt709:colormatrix=bt709:range=full:sar=3:overscan=show:chromaloc=2:videoformat=pal",
+                "yuv420p",
+            ),
+            true,
+        ),
+        ("x265-lossless", x265("lossless=1", "yuv420p"), true),
+        ("x265-10bit", x265("", "yuv420p10le"), true),
+        ("x265-422", x265("", "yuv422p10le"), true),
+        ("x265-444", x265("", "yuv444p"), true),
+        ("x265-gray", x265("", "gray"), true),
+        ("nvenc", hardware("hevc_nvenc", &[]), false),
+        (
+            "nvenc-10bit",
+            hardware("hevc_nvenc", &["-pix_fmt", "p010le"]),
+            false,
+        ),
+        ("amf", hardware("hevc_amf", &[]), false),
+        (
+            "vulkan",
+            hardware(
+                "hevc_vulkan",
+                &["-init_hw_device", "vulkan", "-vf", "format=nv12,hwupload"],
+            ),
+            false,
+        ),
+    ];
+    for (name, args, required) in cases {
+        let path =
+            std::env::temp_dir().join(format!("black-hevc-{}-{name}.mp4", std::process::id()));
+        let out = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=256x144:rate=24",
+                "-t",
+                "0.5",
+            ])
+            .args(&args)
+            .args(["-y".as_ref(), path.as_os_str()])
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            assert!(
+                !required,
+                "ffmpeg failed on {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            eprintln!(
+                "skipped {name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+            );
+            continue;
+        }
+        let config = Video::read(&mut File::open(&path).unwrap())
+            .unwrap()
+            .hevc()
+            .unwrap();
+        let theirs = ffmpeg_trace(&path);
+        let section = |title: &str| {
+            &theirs
+                .iter()
+                .find(|s| s.0 == title)
+                .unwrap_or_else(|| panic!("{name}: no {title} in ffmpeg's trace"))
+                .1
+        };
+        let nal = |kind: u8| {
+            config
+                .nal_units
+                .iter()
+                .find(|n| n[0] >> 1 & 0x3F == kind)
+                .unwrap()
+        };
+        let (sps, trace) = Sps::trace(nal(33));
+        let sps = sps.unwrap_or_else(|e| panic!("{name}: {e}"));
+        compare(
+            &format!("{name} SPS"),
+            &trace,
+            section("Sequence Parameter Set"),
+        );
+        let (pps, trace) = Pps::trace(nal(34));
+        pps.unwrap_or_else(|e| panic!("{name}: {e}"));
+        compare(
+            &format!("{name} PPS"),
+            &trace,
+            section("Picture Parameter Set"),
+        );
+        let [left, right, top, bottom] = sps.crop;
+        assert_eq!(
+            (sps.width - left - right, sps.height - top - bottom),
+            (256, 144),
+            "{name}: the picture after cropping"
+        );
+        eprintln!(
+            "{name}: {} SPS and {} PPS elements match",
+            section("Sequence Parameter Set").len(),
+            section("Picture Parameter Set").len()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -5,6 +5,10 @@ picture from any point in a video, for BrendanTv's thumbnails, without ffmpeg.
 
 ## So far
 
+`params` reads the sequence and picture parameter sets (SPS and PPS): picture size, bit depth,
+block sizes, coding tools, scaling lists, reference picture sets, tiles, and the colour
+description. Each can be traced element by element, for comparison with ffmpeg.
+
 `mp4` reads the first video track's index: every frame's place, size, time and whether it's a
 keyframe, plus the HEVC decoder configuration (`hvcC`). Only the index is read into memory, so
 a multi-gigabyte file with its index at the end costs a few milliseconds.
@@ -25,7 +29,7 @@ Fragmented MP4 and encrypted video are reported as unsupported.
 ## Plan
 
 1. MP4: find the keyframe *(done)*
-2. HEVC parameter sets and slice headers
+2. HEVC parameter sets *(done)*, then slice headers
 3. CABAC: the slice data
 4. Intra prediction and the inverse transforms: a YUV picture
 5. RGB, scaled, as a PNG (black-png); a C interface for BrendanTv to call through Java's FFM API
@@ -37,6 +41,8 @@ Only keyframes are decoded, since a thumbnail doesn't need the exact frame.
 
 ```sh
 cargo test
-winrun --test   # also checks every frame against ffprobe, on Windows with ffmpeg on PATH
+winrun --test   # also checks every frame against ffprobe, and every SPS and PPS syntax
+                # element against ffmpeg's trace_headers, on Windows with ffmpeg on PATH
 cargo run --release --example keyframe -- video.mp4 240
+cargo run --release --example params -- video.mp4
 ```
