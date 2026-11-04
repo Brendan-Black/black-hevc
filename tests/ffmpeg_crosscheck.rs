@@ -1075,3 +1075,71 @@ fn stills_of_a_real_video() {
         assert!(largest <= 1, "at {max}: differ by {largest}");
     }
 }
+
+/// The C interface's PNG, in memory and as a file, holds the same pixels as `still::rgb`.
+#[test]
+fn c_interface_gives_the_still() {
+    use black_hevc::ffi::{OK, black_hevc_free, black_hevc_still, black_hevc_still_file};
+    use std::ffi::CString;
+    if !have_ffmpeg() {
+        return;
+    }
+    let args: Vec<String> = [
+        "-c:v",
+        "libx265",
+        "-x265-params",
+        "log-level=error:keyint=12",
+    ]
+    .map(String::from)
+    .into();
+    let path = encode("c-interface", &args, true, None).unwrap();
+    let video = CString::new(path.to_str().unwrap()).unwrap();
+    let (mut png, mut len) = (std::ptr::null_mut(), 0);
+    let code = unsafe {
+        black_hevc_still(
+            video.as_ptr(),
+            0.6,
+            90,
+            &mut png,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(code, OK);
+    let bytes = unsafe { std::slice::from_raw_parts(png, len) }.to_vec();
+    unsafe { black_hevc_free(png, len) };
+    let out = path.with_extension("png");
+    let out_c = CString::new(out.to_str().unwrap()).unwrap();
+    let code = unsafe {
+        black_hevc_still_file(
+            video.as_ptr(),
+            0.6,
+            90,
+            out_c.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(code, OK);
+    assert_eq!(std::fs::read(&out).unwrap(), bytes);
+
+    // The keyframe at or before 0.6 s: with one every 12 frames at 24 a second, the second.
+    let mut file = File::open(&path).unwrap();
+    let mp4 = Video::read(&mut file).unwrap();
+    let key = mp4.keyframe_at(0.6).unwrap();
+    assert!(key.time > 0);
+    let config = mp4.hevc().unwrap();
+    let mut params = ParamSets::new();
+    for nal in &config.nal_units {
+        params.add(nal).unwrap();
+    }
+    let data = key.read(&mut file).unwrap();
+    let pic = picture::decode(&mut params, &nal_units(&data, config.length_size).unwrap()).unwrap();
+    let rgb = still::rgb(&pic, 90);
+    let image = black_png::decode(&bytes, 1 << 20).unwrap();
+    assert_eq!((image.width, image.height), (rgb.width, rgb.height));
+    assert_eq!(image.pixels, rgb.pixels);
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&path);
+}

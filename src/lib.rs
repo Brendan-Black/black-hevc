@@ -2,12 +2,14 @@
 //!
 //! So far: [`mp4`] finds a video's keyframes in an MP4 file and reads them out as NAL units,
 //! [`params`] reads the parameter sets, [`slice`] the slice headers, [`slice_data`] the coded
-//! blocks of intra pictures, and [`picture`] turns those into samples, and [`still`] into RGB thumbnails and PNGs. The in-loop filters
+//! blocks of intra pictures, [`picture`] turns those into samples, and [`still`] into RGB
+//! thumbnails and PNGs, which [`ffi`] offers to other languages. The in-loop filters
 //! (deblocking and SAO) come next.
 
 mod bits;
 mod cabac;
 mod error;
+pub mod ffi;
 pub mod mp4;
 pub mod nal;
 pub mod params;

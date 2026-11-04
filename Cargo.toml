@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "HEVC (H.265) keyframes from MP4 files, with no third-party dependencies"
 
+# rlib for Rust, cdylib for everything else (include/black_hevc.h).
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 # No third-party crates. black-png (and its black-zlib) are our own sibling repos; clone them
 # next to this one.
 [dependencies]

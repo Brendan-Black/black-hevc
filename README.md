@@ -19,6 +19,17 @@ tent filter as wide as an output pixel. `still::rgb` does the conversion from a 
 Every pixel is within one level of ffmpeg's conversion (given the same matrix, range and chroma
 placement), at full size and scaled. black-png and black-zlib must be cloned next to this repo.
 
+For other languages, `cargo build --release` also builds a C library (`black_hevc.dll`,
+`libblack_hevc.so`) declared in `include/black_hevc.h`: `black_hevc_still_file` writes the
+still to a PNG file, and `black_hevc_still` returns it in memory (given back with
+`black_hevc_free`). Each returns a status code and fills a caller's buffer with a message on
+failure; panics never cross into the caller. `examples/java/Still.java` calls it through
+Java's FFM API:
+
+```sh
+java --enable-native-access=ALL-UNNAMED examples/java/Still.java black_hevc.dll episode.mp4 240 still.png
+```
+
 `picture::decode` turns a keyframe's NAL units into a picture: Y, Cb and Cr planes at the
 coded size, with the crop to apply. It does intra prediction (planar, DC and the 33 angles,
 with reference smoothing), scaling with or without scaling lists, the inverse DCT and DST,
@@ -67,7 +78,8 @@ Fragmented MP4 and encrypted video are reported as unsupported.
 2. HEVC parameter sets and slice headers *(done)*
 3. CABAC: the decoding engine, and the slice data of intra pictures *(done)*
 4. Intra prediction and the inverse transforms: a YUV picture *(done)*
-5. RGB, scaled, as a PNG (black-png) *(done)*; a C interface for BrendanTv to call through Java's FFM API
+5. RGB, scaled, as a PNG (black-png), and a C interface for BrendanTv to call through Java's
+   FFM API *(done)*
 6. The deblocking and SAO filters
 
 Only keyframes are decoded, since a thumbnail doesn't need the exact frame.
