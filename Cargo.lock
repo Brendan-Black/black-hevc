@@ -5,3 +5,17 @@ version = 4
 [[package]]
 name = "black-hevc"
 version = "0.1.0"
+dependencies = [
+ "black-png",
+]
+
+[[package]]
+name = "black-png"
+version = "0.1.0"
+dependencies = [
+ "black-zlib",
+]
+
+[[package]]
+name = "black-zlib"
+version = "0.1.0"

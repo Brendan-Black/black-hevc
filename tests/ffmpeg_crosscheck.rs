@@ -14,6 +14,7 @@ use black_hevc::params::{ParamSets, Pps, Sps};
 use black_hevc::picture::{self, Picture};
 use black_hevc::slice::SliceHeader;
 use black_hevc::slice_data::{CodingUnit, PictureParser, Sink, TransformBlock};
+use black_hevc::still;
 use black_hevc::{Error, Syntax};
 
 fn have_ffmpeg() -> bool {
@@ -777,10 +778,21 @@ fn encoder_cases() -> Vec<(&'static str, Vec<String>, bool)> {
 }
 
 /// Encode a second of noisy test pattern at 200x120, or `None` if an optional encoder failed.
+/// (The GPU uploads add their own noise.)
 fn encode_case(name: &str, args: &[String], required: bool) -> Option<PathBuf> {
+    let gpu = args.iter().any(|a| a.contains("hwupload"));
+    encode(
+        name,
+        args,
+        required,
+        (!gpu).then_some("noise=alls=30:allf=t"),
+    )
+}
+
+/// [`encode_case`], with the test pattern through `filter` if there is one.
+fn encode(name: &str, args: &[String], required: bool, filter: Option<&str>) -> Option<PathBuf> {
     let path =
         std::env::temp_dir().join(format!("black-hevc-{}-keys-{name}.mp4", std::process::id()));
-    let noisy = !args.iter().any(|a| a.contains("hwupload"));
     let out = Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -794,11 +806,7 @@ fn encode_case(name: &str, args: &[String], required: bool) -> Option<PathBuf> {
             "-t",
             "1",
         ])
-        .args(if noisy {
-            &["-vf", "noise=alls=30:allf=t"][..]
-        } else {
-            &[]
-        })
+        .args(filter.map(|f| ["-vf", f]).iter().flatten())
         .args(args)
         .args(["-y".as_ref(), path.as_os_str()])
         .output()
@@ -846,11 +854,10 @@ fn pix_fmt(pic: &Picture) -> String {
     }
 }
 
-/// Decode every keyframe, and decode them again with ffmpeg: each keyframe is written out as a
-/// raw HEVC stream of its own (a CRA marked as a BLA, so it starts a new sequence) and ffmpeg
-/// decodes it with its loop filters skipped, since ours aren't done yet. Every shown sample
-/// must match. Returns how many keyframes.
-fn check_pixels(name: &str, path: &Path) -> usize {
+/// Decode every keyframe, and write each one out as a raw HEVC stream of its own for ffmpeg (a
+/// CRA marked as a BLA, so it starts a new sequence). `check` gets the keyframe's number, our
+/// picture and the stream's path. Returns how many keyframes.
+fn each_keyframe(name: &str, path: &Path, mut check: impl FnMut(usize, &Picture, &Path)) -> usize {
     let video = Video::read(&mut File::open(path).unwrap()).unwrap();
     let config = video.hevc().unwrap();
     let mut params = ParamSets::new();
@@ -876,16 +883,37 @@ fn check_pixels(name: &str, path: &Path) -> usize {
         }
         let hevc = path.with_extension(format!("{count}.hevc"));
         std::fs::write(&hevc, stream).unwrap();
-        let out = Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
-            .args(["-skip_loop_filter", "all", "-i"])
-            .arg(&hevc)
-            .args(["-f", "rawvideo", "-pix_fmt", &pix_fmt(&pic), "-"])
-            .output()
-            .unwrap();
+        check(count, &pic, &hevc);
         let _ = std::fs::remove_file(&hevc);
-        assert!(out.status.success(), "{name}: ffmpeg failed");
-        let mut theirs = out.stdout.as_slice();
+        count += 1;
+    }
+    count
+}
+
+/// ffmpeg's decode of one keyframe's stream, with its loop filters skipped (ours aren't done
+/// yet), through `filter` if there is one, as `pix_fmt` raw video.
+fn ffmpeg_decode(name: &str, hevc: &Path, filter: Option<&str>, pix_fmt: &str) -> Vec<u8> {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+        .args(["-skip_loop_filter", "all", "-i"])
+        .arg(hevc)
+        .args(filter.map(|f| ["-vf", f]).iter().flatten())
+        .args(["-f", "rawvideo", "-pix_fmt", pix_fmt, "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{name}: ffmpeg failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// Every keyframe's shown samples must match ffmpeg's exactly. Returns how many keyframes.
+fn check_pixels(name: &str, path: &Path) -> usize {
+    each_keyframe(name, path, |count, pic, hevc| {
+        let out = ffmpeg_decode(name, hevc, None, &pix_fmt(pic));
+        let mut theirs = out.as_slice();
         for c in 0..pic.planes.len() {
             let (w, h, ours) = pic.cropped(c);
             let wide = if c == 0 {
@@ -919,9 +947,94 @@ fn check_pixels(name: &str, path: &Path) -> usize {
             theirs.is_empty(),
             "{name}: ffmpeg decoded more than one picture"
         );
-        count += 1;
+    })
+}
+
+/// Every keyframe as RGB, fitting in `max` by `max`, must be close to ffmpeg's conversion with
+/// the same matrix and range, chroma placed where H.265 puts it by default (ffmpeg would
+/// centre it across) and its bilinear scaling: returns the largest difference in any channel
+/// of any pixel, and the mean difference, over all keyframes.
+fn check_colours(name: &str, path: &Path, max: u32) -> (u8, f64) {
+    let (mut largest, mut total, mut n) = (0, 0u64, 0u64);
+    each_keyframe(name, path, |count, pic, hevc| {
+        let ours = still::rgb(pic, max);
+        let matrix = match pic.colour.matrix {
+            1 => "bt709",
+            4 => "fcc",
+            5 | 6 => "bt601",
+            7 => "smpte240m",
+            9 | 10 => "bt2020",
+            _ if pic.height >= 720 => "bt709",
+            _ => "bt601",
+        };
+        let range = if pic.colour.full_range { "pc" } else { "tv" };
+        let filter = format!(
+            "scale={}:{}:flags=bilinear+accurate_rnd+full_chroma_int:in_color_matrix={matrix}:in_range={range}:in_chroma_loc=left",
+            ours.width, ours.height
+        );
+        let theirs = ffmpeg_decode(name, hevc, Some(&filter), "rgb24");
+        assert_eq!(
+            theirs.len(),
+            ours.pixels.len(),
+            "{name}: keyframe {count}: sizes differ"
+        );
+        for (i, (&a, &b)) in ours.pixels.iter().zip(&theirs).enumerate() {
+            let d = a.abs_diff(b);
+            if d > largest {
+                largest = d;
+                eprintln!(
+                    "{name}: keyframe {count}: {d} at ({}, {}) channel {}: {a}, ffmpeg {b}",
+                    i / 3 % ours.width as usize,
+                    i / 3 / ours.width as usize,
+                    i % 3
+                );
+            }
+            total += u64::from(d);
+        }
+        n += theirs.len() as u64;
+    });
+    (largest, total as f64 / n as f64)
+}
+
+#[test]
+fn stills_match_ffmpegs_colours() {
+    if !have_ffmpeg() {
+        return;
     }
-    count
+    // Without noise, which makes any two ways of interpolating chroma differ a lot.
+    let cases = [
+        ("rgb-420", "yuv420p", ""),
+        ("rgb-422", "yuv422p", ""),
+        ("rgb-444", "yuv444p", ""),
+        ("rgb-gray", "gray", ""),
+        ("rgb-10bit", "yuv420p10le", ""),
+        (
+            "rgb-full-709",
+            "yuv420p",
+            "-color_range pc -colorspace bt709",
+        ),
+        ("rgb-2020", "yuv420p10le", "-colorspace bt2020nc"),
+        ("rgb-gbr", "gbrp", ""),
+    ];
+    for (name, pix, colour) in cases {
+        let args: Vec<String> = ["-pix_fmt", pix, "-c:v", "libx265", "-x265-params"]
+            .into_iter()
+            .chain(["log-level=error:keyint=4:crf=8"])
+            .chain(colour.split_whitespace())
+            .map(String::from)
+            .collect();
+        let path = encode(name, &args, true, None).unwrap();
+        // Full size (chroma scaled up), then scaled down.
+        for max in [0, 90] {
+            let (largest, mean) = check_colours(name, &path, max);
+            eprintln!("{name} at {max}: differ by {largest} at most, {mean:.3} on average");
+            // ffmpeg scales planar RGB its own way; 4:4:4 YUV checks our scaling instead.
+            if !(name == "rgb-gbr" && max > 0) {
+                assert!(largest <= 1, "{name} at {max}: differ by {largest}");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[test]
@@ -948,4 +1061,17 @@ fn pixels_of_a_real_video() {
         std::env::var_os("BLACK_HEVC_VIDEO").expect("set BLACK_HEVC_VIDEO to a video's path");
     let n = check_pixels("the video", Path::new(&path));
     eprintln!("{n} keyframes match");
+}
+
+/// With BLACK_HEVC_VIDEO set to a video of your own: its stills are close to ffmpeg's.
+#[test]
+#[ignore]
+fn stills_of_a_real_video() {
+    let path =
+        std::env::var_os("BLACK_HEVC_VIDEO").expect("set BLACK_HEVC_VIDEO to a video's path");
+    for max in [0, 320] {
+        let (largest, mean) = check_colours("the video", Path::new(&path), max);
+        eprintln!("at {max}: differ by {largest} at most, {mean:.3} on average");
+        assert!(largest <= 1, "at {max}: differ by {largest}");
+    }
 }

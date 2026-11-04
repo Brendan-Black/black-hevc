@@ -3,7 +3,7 @@
 //! The in-loop filters (deblocking and SAO) aren't applied yet.
 
 use crate::nal::NalHeader;
-use crate::params::{ParamSets, Pps, Sps};
+use crate::params::{Colour, ParamSets, Pps, Sps};
 use crate::slice::SliceHeader;
 use crate::slice_data::{CodingUnit, DC, PictureParser, Sao, Scans, Sink, TransformBlock};
 use crate::{Error, Result, rbsp};
@@ -20,6 +20,8 @@ pub struct Picture {
     pub bit_depth_chroma: u8,
     /// Luma samples to crop from the left, right, top and bottom for display.
     pub crop: [u32; 4],
+    /// How the samples map to colours.
+    pub colour: Colour,
     /// Each plane row by row, with no padding.
     pub planes: Vec<Vec<u16>>,
 }
@@ -33,6 +35,7 @@ impl Picture {
             bit_depth_luma: sps.bit_depth_luma,
             bit_depth_chroma: sps.bit_depth_chroma,
             crop: sps.crop,
+            colour: sps.colour,
             planes: Vec::new(),
         };
         let n = if sps.chroma_format == 0 { 1 } else { 3 };

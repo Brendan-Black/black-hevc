@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "HEVC (H.265) keyframes from MP4 files, with no third-party dependencies"
 
-# No third-party crates.
+# No third-party crates. black-png (and its black-zlib) are our own sibling repos; clone them
+# next to this one.
 [dependencies]
+black-png = { path = "../black-png" }
