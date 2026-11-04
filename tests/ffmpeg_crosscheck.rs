@@ -1143,3 +1143,102 @@ fn c_interface_gives_the_still() {
     let _ = std::fs::remove_file(&out);
     let _ = std::fs::remove_file(&path);
 }
+
+/// Damaged keyframes (flipped bits, overwritten runs of bytes, cut-off NAL units, in the
+/// parameter sets as well as the slices) decode to a picture or an error: never a panic, and
+/// never slowly. Run it in a debug build too, where arithmetic overflow panics.
+#[test]
+fn damaged_keyframes_never_panic() {
+    if !have_ffmpeg() {
+        return;
+    }
+    const TRIALS: usize = 400;
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut random = move |below: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % below.max(1) as u64) as usize
+    };
+    let cases = [
+        "x265",
+        "slices",
+        "small-blocks",
+        "quant-groups",
+        "cu-lossless",
+        "scaling-lists",
+        "422",
+        "gray",
+        "444-10bit",
+    ];
+    let mut panics = Vec::new();
+    let mut decoded = 0;
+    for (name, args, _) in encoder_cases().into_iter().filter(|c| cases.contains(&c.0)) {
+        let path = encode_case(name, &args, true).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let video = Video::read(&mut file).unwrap();
+        let config = video.hevc().unwrap();
+        for key in video.samples().iter().filter(|s| s.keyframe).take(2) {
+            let data = key.read(&mut file).unwrap();
+            let units = nal_units(&data, config.length_size).unwrap();
+            let nals: Vec<Vec<u8>> = config
+                .nal_units
+                .iter()
+                .cloned()
+                .chain(units.iter().map(|n| n.to_vec()))
+                .collect();
+            for trial in 0..TRIALS {
+                let mut damaged = nals.clone();
+                let nal = &mut damaged[random(nals.len())];
+                let how = random(3);
+                match how {
+                    0 => {
+                        for _ in 0..1 + random(4) {
+                            let at = random(nal.len());
+                            nal[at] ^= 1 << random(8);
+                        }
+                    }
+                    1 => {
+                        let at = random(nal.len());
+                        let end = (at + 1 + random(16)).min(nal.len());
+                        for b in &mut nal[at..end] {
+                            *b = random(256) as u8;
+                        }
+                    }
+                    _ => nal.truncate(random(nal.len())),
+                }
+                let refs: Vec<&[u8]> = damaged.iter().map(Vec::as_slice).collect();
+                let start = std::time::Instant::now();
+                let result = std::panic::catch_unwind(|| {
+                    if let Ok(pic) = picture::decode(&mut ParamSets::new(), &refs) {
+                        still::rgb(&pic, 90);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                match result {
+                    Ok(true) => decoded += 1,
+                    Ok(false) => {}
+                    Err(e) => panics.push(format!(
+                        "{name}, keyframe at {}, trial {trial} (damage {how}): {}",
+                        key.time,
+                        e.downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_default()
+                    )),
+                }
+                let took = start.elapsed();
+                assert!(took.as_secs() < 5, "{name}, trial {trial}: took {took:?}");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    eprintln!(
+        "{decoded} of {} damaged keyframes still decoded; {} panicked",
+        cases.len() * 2 * TRIALS,
+        panics.len()
+    );
+    assert!(panics.is_empty(), "{}", panics.join("\n"));
+}

@@ -91,7 +91,8 @@ cargo test
 winrun --test   # also checks every frame against ffprobe, and every SPS and PPS syntax
                 # element against ffmpeg's trace_headers, on Windows with ffmpeg on PATH;
                 # every slice header too, and every keyframe's pixels against ffmpeg's
-                # (loop filters off), and stills' colours against ffmpeg's. For a video of
+                # (loop filters off), and stills' colours against ffmpeg's. Damaged keyframes
+                # (thousands of them) must never panic, also in a debug build. For a video of
                 # your own (its slice headers, every keyframe's pixels, and its stills):
                 # BLACK_HEVC_VIDEO=<path> <test exe> --ignored
 cargo run --release --example keyframe -- video.mp4 240

@@ -7,6 +7,8 @@ use crate::{Error, Result};
 
 /// The largest picture side the standard allows (level 6.2).
 const MAX_SIDE: u32 = 16888;
+/// MaxLumaPs at level 6.2 (Table A.8).
+const MAX_LUMA_SAMPLES: u64 = 35_651_584;
 
 /// The most pictures a reference picture set may name.
 const MAX_REFS: usize = 16;
@@ -249,6 +251,13 @@ impl Sps {
         let separate_colour_planes = chroma_format == 3 && b.flag("separate_colour_plane_flag")?;
         let width = b.ue("pic_width_in_luma_samples", MAX_SIDE)?;
         let height = b.ue("pic_height_in_luma_samples", MAX_SIDE)?;
+        // The largest picture any level allows (8192x4320 at level 6.2), so a damaged SPS can't
+        // ask for a gigabyte.
+        if u64::from(width) * u64::from(height) > MAX_LUMA_SAMPLES {
+            return Err(Error::unsupported(format!(
+                "a {width}x{height} picture (larger than any HEVC level allows)"
+            )));
+        }
         let (sub_w, sub_h) = match (chroma_format, separate_colour_planes) {
             (1, _) => (2, 2),
             (2, _) => (2, 1),
