@@ -8,7 +8,7 @@ import java.lang.invoke.MethodHandle;
 import java.nio.file.Path;
 
 /**
- * Calls black-hevc from Java through the FFM API, as BrendanTv will:
+ * Calls black-hevc from Java through the FFM API:
  * {@code java --enable-native-access=ALL-UNNAMED Still.java <black_hevc.dll> <video.mp4> <seconds> <out.png> [max]}
  */
 public class Still {

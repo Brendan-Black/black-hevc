@@ -2,16 +2,17 @@
 name = "black-hevc"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/Brendan-Black/black-hevc"
 description = "HEVC (H.265) keyframes from MP4 files, with no third-party dependencies"
 
 # rlib for Rust, cdylib for everything else (include/black_hevc.h).
 [lib]
 crate-type = ["rlib", "cdylib"]
 
-# No third-party crates. black-png (and its black-zlib) are our own sibling repos; clone them
-# next to this one.
+# No third-party crates. black-png (and its black-zlib) are our own, pinned to a release tag.
 [dependencies]
-black-png = { path = "../black-png" }
+black-png = { git = "https://github.com/Brendan-Black/black-png", tag = "v0.1.0" }
 
 [package.metadata.black]
 version = "0.1.0"

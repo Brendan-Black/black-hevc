@@ -1,7 +1,7 @@
 # black-hevc
 
 HEVC (H.265) keyframes from MP4 files, with no third-party dependencies. The goal is a still
-picture from any point in a video, for BrendanTv's thumbnails, without ffmpeg.
+picture from any point in a video, for a media library's thumbnails, without ffmpeg.
 
 ## So far
 
@@ -17,7 +17,7 @@ or full range); a video that doesn't say gets BT.709 if it's 720 lines or more, 
 Chroma sits where H.265 puts it by default (with the left luma sample across). Scaling uses a
 tent filter as wide as an output pixel. `still::rgb` does the conversion from a `Picture`.
 Every pixel is within one level of ffmpeg's conversion (given the same matrix, range and chroma
-placement), at full size and scaled. black-png and black-zlib must be cloned next to this repo.
+placement), at full size and scaled.
 
 For other languages, `cargo build --release` also builds a C library (`black_hevc.dll`,
 `libblack_hevc.so`) declared in `include/black_hevc.h`: `black_hevc_still_file` writes the
@@ -78,8 +78,8 @@ Fragmented MP4 and encrypted video are reported as unsupported.
 2. HEVC parameter sets and slice headers *(done)*
 3. CABAC: the decoding engine, and the slice data of intra pictures *(done)*
 4. Intra prediction and the inverse transforms: a YUV picture *(done)*
-5. RGB, scaled, as a PNG (black-png), and a C interface for BrendanTv to call through Java's
-   FFM API *(done)*
+5. RGB, scaled, as a PNG (black-png), and a C interface, called from Java
+   through the FFM API *(done)*
 6. The deblocking and SAO filters
 
 Only keyframes are decoded, since a thumbnail doesn't need the exact frame.
@@ -87,9 +87,8 @@ Only keyframes are decoded, since a thumbnail doesn't need the exact frame.
 ## Tests
 
 ```sh
-cargo test
-winrun --test   # also checks every frame against ffprobe, and every SPS and PPS syntax
-                # element against ffmpeg's trace_headers, on Windows with ffmpeg on PATH;
+cargo test      # on Windows with ffmpeg on PATH, also checks every frame against ffprobe, and
+                # every SPS and PPS syntax element against ffmpeg's trace_headers;
                 # every slice header too, and every keyframe's pixels against ffmpeg's
                 # (loop filters off), and stills' colours against ffmpeg's. Damaged keyframes
                 # (thousands of them) must never panic, also in a debug build. For a video of
@@ -101,3 +100,7 @@ cargo run --release --example keyframes -- video.mp4 20   # read 20 keyframes to
 cargo run --release --example decode -- video.mp4 out.yuv 20   # 20 keyframes as raw YUV
 cargo run --release --example still -- video.mp4 240 still.png 320   # the still at 4:00
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

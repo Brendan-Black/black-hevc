@@ -1,4 +1,4 @@
-//! A C interface, for calling from other languages (BrendanTv calls it through Java's FFM API).
+//! A C interface, for calling from other languages (such as Java, through its FFM API).
 //! `include/black_hevc.h` declares it.
 //!
 //! Every function returns one of the status codes below, and on failure writes a message to

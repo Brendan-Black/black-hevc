@@ -85,7 +85,7 @@ fn reads_what_ffmpeg_writes() {
 	}
 	let x265 = |params: &str| ["-c:v", "libx265", "-x265-params"].into_iter().map(String::from).chain([format!("log-level=error:{params}")]).collect::<Vec<_>>();
 	let cases: Vec<(&str, Vec<String>, &[&str])> = vec![
-		// Open GOPs (CRA keyframes) and B-frames, index at the end: like the films BrendanTv plays.
+		// Open GOPs (CRA keyframes) and B-frames, index at the end: like most films.
 		("open-gop", x265("keyint=48:min-keyint=12:bframes=4"), &["-tag:v", "hvc1"]),
 		// Closed GOPs (IDR keyframes), index first, parameter sets also in the frames.
 		("closed-gop", x265("keyint=30:open-gop=0:bframes=2"), &["-tag:v", "hev1", "-movflags", "+faststart"]),
