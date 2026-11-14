@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			previous = Some(header);
 		}
 		let parser = picture.ok_or("a keyframe with no slices")?;
-		let (pps, sps) = params.get(u32::from(previous.as_ref().unwrap().pps_id))?;
+		let (pps, sps) = params.get(u32::from(previous.as_ref().ok_or("a keyframe with no slices")?.pps_id))?;
 		let _ = pps;
 		let area = u64::from(sps.width) * u64::from(sps.height);
 		if !parser.complete() || sink.cu_area != area || sink.luma_area != area {

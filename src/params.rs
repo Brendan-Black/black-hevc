@@ -1038,7 +1038,9 @@ mod tests {
 		for i in 0..SPS.len() * 8 {
 			let mut s = SPS;
 			s[i / 8] ^= 0x80 >> (i % 8);
+			#[expect(clippy::let_underscore_must_use, reason = "only checking it doesn't panic: any result is fine")]
 			let _ = Sps::parse(&s);
+			#[expect(clippy::let_underscore_must_use, reason = "only checking it doesn't panic: any result is fine")]
 			let _ = Pps::parse(&s);
 		}
 	}

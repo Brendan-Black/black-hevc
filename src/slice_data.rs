@@ -574,7 +574,7 @@ impl<S: Sink> Run<'_, '_, '_, S> {
 	/// pcm_sample (7.3.8.7), then the arithmetic decoder starts again after it.
 	fn pcm_samples(&mut self, log2: u8) -> Result<Vec<u16>> {
 		let sps = self.p.sps;
-		let pcm = sps.pcm.unwrap();
+		let pcm = sps.pcm.ok_or_else(|| Error::corrupt("a coding unit uses PCM, but its SPS doesn't enable it"))?;
 		let start = self.cabac.align()?;
 		let data = self.cabac.data().get(start..).ok_or_else(|| Error::corrupt("PCM samples are cut short"))?;
 		let mut b = Bits::new(data, false);
@@ -807,7 +807,7 @@ impl<S: Sink> Run<'_, '_, '_, S> {
 		let i_last = scans.inv[log2_sb][scan][(last_y >> 2) * n_sb + (last_x >> 2)] as usize;
 		let n_last = scans.inv[2][scan][(last_y & 3) * 4 + (last_x & 3)] as usize;
 		let sub_pos: Vec<(u8, u8)> = scans.pos[log2_sb][scan].clone();
-		let pos: [(u8, u8); 16] = scans.pos[2][scan][..].try_into().unwrap();
+		let pos: [(u8, u8); 16] = scans.pos[2][scan][..].try_into().expect("a 4x4 scan has 16 positions");
 
 		let mut coded_sb = [[false; 8]; 8];
 		let mut greater1_ctx = 1u8;
@@ -850,9 +850,9 @@ impl<S: Sink> Run<'_, '_, '_, S> {
 				}
 			}
 			let order: Vec<usize> = (0..16).rev().filter(|&n| sig[n]).collect();
-			if order.is_empty() {
+			let (Some(&last_sig), Some(&first_sig)) = (order.first(), order.last()) else {
 				continue;
-			}
+			};
 
 			// Greater than 1 (for the first eight), greater than 2 (for the first of those).
 			let mut ctx_set = if i == 0 || chroma { 0 } else { 2 };
@@ -877,7 +877,6 @@ impl<S: Sink> Run<'_, '_, '_, S> {
 			if let Some(n) = first_greater1 {
 				greater2[n] = self.bin(ctx::GREATER2 + ctx_set + if chroma { 4 } else { 0 });
 			}
-			let (last_sig, first_sig) = (order[0], *order.last().unwrap());
 			let sign_hidden = sign_hiding && !bypass && last_sig - first_sig > 3;
 			let mut negative = [false; 16];
 			for &n in &order {

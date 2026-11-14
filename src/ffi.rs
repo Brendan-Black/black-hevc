@@ -175,6 +175,7 @@ mod tests {
 		let junk = CString::new(junk.to_str().unwrap()).unwrap();
 		let code = unsafe { black_hevc_still(junk.as_ptr(), 0.0, 0, &mut png, &mut len, std::ptr::null_mut(), 0) };
 		assert_eq!(code, CORRUPT);
+		#[expect(clippy::let_underscore_must_use, reason = "best-effort cleanup of a temporary folder; the test has already passed")]
 		let _ = std::fs::remove_dir_all(&dir);
 		unsafe { black_hevc_free(std::ptr::null_mut(), 0) };
 	}

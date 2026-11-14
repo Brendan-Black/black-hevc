@@ -96,14 +96,16 @@ pub fn decode(params: &mut ParamSets, nal_units: &[&[u8]]) -> Result<Picture> {
 		if header.first_in_pic && state.is_some() {
 			break;
 		}
-		if state.is_none() {
-			if !header.first_in_pic {
-				return Err(Error::corrupt("a picture's first slice is missing"));
+		let (parser, rec) = match state {
+			Some(ref mut s) => s,
+			None => {
+				if !header.first_in_pic {
+					return Err(Error::corrupt("a picture's first slice is missing"));
+				}
+				let (pps, sps) = params.get(u32::from(header.pps_id))?;
+				state.insert((PictureParser::new(sps, pps)?, Reconstructor::new(sps, pps)))
 			}
-			let (pps, sps) = params.get(u32::from(header.pps_id))?;
-			state = Some((PictureParser::new(sps, pps)?, Reconstructor::new(sps, pps)));
-		}
-		let (parser, rec) = state.as_mut().unwrap();
+		};
 		parser.slice(&header, &rbsp(nal), rec)?;
 		previous = Some(header);
 	}
@@ -484,7 +486,7 @@ impl Sink for Reconstructor<'_> {
 		let Some(samples) = &cu.pcm else {
 			return;
 		};
-		let pcm = self.sps.pcm.unwrap();
+		let pcm = self.sps.pcm.expect("a coding unit only has PCM samples when its SPS enables PCM");
 		let mut samples = samples.iter();
 		for c in 0..self.pic.planes.len() {
 			let (sx, sy) = self.pic.subsampling(c);

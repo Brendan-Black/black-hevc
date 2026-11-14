@@ -141,15 +141,17 @@ fn read_index<R: Read + Seek>(file: &mut R) -> Result<Vec<u8>> {
 		file.seek(SeekFrom::Start(pos))?;
 		let mut head = [0u8; 16];
 		file.read_exact(&mut head[..8])?;
-		let kind: [u8; 4] = head[4..8].try_into().unwrap();
+		let [s0, s1, s2, s3, k0, k1, k2, k3, ..] = head;
+		let kind = [k0, k1, k2, k3];
 		if pos == 0 && !kind.iter().all(|c| c.is_ascii_graphic() || *c == b' ') {
 			return Err(Error::corrupt("not an MP4 file"));
 		}
-		let (size, header) = match u32::from_be_bytes(head[..4].try_into().unwrap()) {
+		let (size, header) = match u32::from_be_bytes([s0, s1, s2, s3]) {
 			0 => (len - pos, 8),
 			1 if len - pos >= 16 => {
-				file.read_exact(&mut head[8..])?;
-				(u64::from_be_bytes(head[8..].try_into().unwrap()), 16)
+				let mut large = [0u8; 8];
+				file.read_exact(&mut large)?;
+				(u64::from_be_bytes(large), 16)
 			}
 			1 => return Err(Error::corrupt("the file is cut short")),
 			n => (u64::from(n), 8),
@@ -440,14 +442,12 @@ impl<'a> Iterator for Boxes<'a> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		// Fewer than 8 bytes can't be a box: padding some writers leave.
-		if self.rest.len() < 8 {
-			return None;
-		}
-		let kind: [u8; 4] = self.rest[4..8].try_into().unwrap();
-		let (size, header) = match u32::from_be_bytes(self.rest[..4].try_into().unwrap()) {
+		let &[s0, s1, s2, s3, k0, k1, k2, k3] = self.rest.first_chunk::<8>()?;
+		let kind = [k0, k1, k2, k3];
+		let (size, header) = match u32::from_be_bytes([s0, s1, s2, s3]) {
 			0 => (self.rest.len() as u64, 8),
-			1 => match self.rest.get(8..16) {
-				Some(s) => (u64::from_be_bytes(s.try_into().unwrap()), 16),
+			1 => match self.rest.get(8..16).and_then(|s| <[u8; 8]>::try_from(s).ok()) {
+				Some(s) => (u64::from_be_bytes(s), 16),
 				None => (0, 16),
 			},
 			n => (u64::from(n), 8),
@@ -506,16 +506,20 @@ impl<'a> Bytes<'a> {
 		Ok(self.take(1)?[0])
 	}
 
+	fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+		Ok(self.take(N)?.try_into().expect("take(n) returns exactly n bytes"))
+	}
+
 	fn u16(&mut self) -> Result<u16> {
-		Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
+		Ok(u16::from_be_bytes(self.array()?))
 	}
 
 	fn u32(&mut self) -> Result<u32> {
-		Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+		Ok(u32::from_be_bytes(self.array()?))
 	}
 
 	fn u64(&mut self) -> Result<u64> {
-		Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+		Ok(u64::from_be_bytes(self.array()?))
 	}
 }
 
@@ -720,6 +724,7 @@ mod tests {
 		let f = standard();
 		let moov_at = f.windows(4).rposition(|w| w == b"moov").unwrap() - 4;
 		for cut in 0..f.len() {
+			#[expect(clippy::let_underscore_must_use, reason = "only checking it doesn't panic: any result is fine")]
 			let _ = Video::read(&mut Cursor::new(&f[..cut]));
 		}
 		// Change each byte of the index in turn.
@@ -729,6 +734,7 @@ mod tests {
 				g[i] = x;
 				if let Ok(video) = Video::read(&mut Cursor::new(&g)) {
 					let _ = video.keyframe_at(1.0);
+					#[expect(clippy::let_underscore_must_use, reason = "only checking it doesn't panic: any result is fine")]
 					let _ = video.hevc();
 				}
 			}
