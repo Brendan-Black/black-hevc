@@ -70,6 +70,9 @@ unsafe fn run(error: *mut c_char, error_cap: usize, f: impl FnOnce() -> Result<(
 ///
 /// # Safety
 /// `p` is null or a NUL-terminated string that outlives `'a`.
+/// What the video argument is called in errors.
+const VIDEO: &str = "video";
+
 unsafe fn path<'a>(p: *const c_char, what: &str) -> Result<&'a Path, Failure> {
 	if p.is_null() {
 		return Err((ARGUMENT, format!("the {what} path is null")));
@@ -90,7 +93,7 @@ pub unsafe extern "C" fn black_hevc_still_file(video: *const c_char, seconds: f6
 	// SAFETY: the caller's promises, passed on.
 	unsafe {
 		run(error, error_cap, || {
-			let (video, out) = (path(video, "video")?, path(out, "PNG")?);
+			let (video, out) = (path(video, VIDEO)?, path(out, "PNG")?);
 			let png = still(video, seconds, max)?;
 			std::fs::write(out, png).map_err(|e| (IO, format!("writing {} failed: {e}", out.display())))
 		})
@@ -120,7 +123,7 @@ pub unsafe extern "C" fn black_hevc_still(
 			if png.is_null() || png_len.is_null() {
 				return Err((ARGUMENT, "png or png_len is null".into()));
 			}
-			let bytes = still(path(video, "video")?, seconds, max)?.into_boxed_slice();
+			let bytes = still(path(video, VIDEO)?, seconds, max)?.into_boxed_slice();
 			*png_len = bytes.len();
 			*png = Box::into_raw(bytes).cast();
 			Ok(())
